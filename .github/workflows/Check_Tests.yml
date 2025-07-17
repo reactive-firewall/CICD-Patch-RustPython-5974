@@ -48,7 +48,6 @@ jobs:
         os: [ubuntu-latest, macos-14, macos-15, windows-latest]
         python-version: ["${{ vars.PYTHON_OLD_MIN }}", "${{ vars.PYTHON_OLD_EXTRA }}", "${{ vars.PYTHON_DEFAULT }}", "${{ vars.PYTHON_EXPERIMENTAL }}"]
         experimental: [true]
-        lang-var: 'en_US.UTF-8'
         include:
           - os: ubuntu-latest
             python-version: "${{ vars.PYTHON_DEFAULT }}"
@@ -61,15 +60,11 @@ jobs:
             experimental: false
           - os: macos-14
             python-version: "${{ vars.PYTHON_DEFAULT }}"
-            lang-var: "en_US.utf-8"
             experimental: true
     outputs:
       bootstrap_status: ${{ steps.smoke_testing.outcome }}
     env:
       PYTHON_VERSION: ${{ matrix.python-version }}
-      LANG: ${{ matrix.lang-var }}
-      LC_CTYPE: ${{ matrix.lang-var }}
-      LC_ALL: ${{ matrix.lang-var }}
     steps:
       - name: Checkout RustPython repository
         id: rpython
@@ -125,7 +120,6 @@ jobs:
           printf "python-version=%s\n" "${{ matrix.python-version }}" >> "$GITHUB_OUTPUT"
           printf "PYTHON_VERSION=%s\n" "${{ matrix.python-version }}" >> "$GITHUB_ENV"
           printf "%s\n" "::endgroup::"
-        shell: bash
       - name: Try Smoke Testing
         id: smoke_testing
         shell: bash
