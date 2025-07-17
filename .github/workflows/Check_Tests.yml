@@ -29,7 +29,7 @@ env:
   TEST_MATCH_PATTERN: "Lib/tests/*.py"
 
 jobs:
-  BOOTSTRAP:
+  TEST-5974:
     permissions:
       actions: read
       contents: read
@@ -38,7 +38,6 @@ jobs:
       pull-requests: read
       security-events: none
     if: ${{ (startsWith(github.ref, 'refs/heads/CI-CD-Patch-')) && !cancelled() }}
-    needs: BUILD
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     continue-on-error: ${{ matrix.experimental }}
