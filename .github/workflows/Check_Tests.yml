@@ -19,7 +19,7 @@ on:  # yamllint disable-line rule:truthy
 permissions: {}
 
 env:
-  ENVIRONMENT: ${{ (startsWith(github.ref, 'refs/heads/CI-CD-Patch-') }}
+  # ENVIRONMENT: ${{ (startsWith(github.ref, 'refs/heads/CI-CD-Patch-') }}
   # Define Python versions at the top level -- Expected format: X.Y (e.g., 3.13)
   PYTHON_DEFAULT: "${{ vars.PYTHON_DEFAULT }}"
   PYTHON_OLD_MIN: "${{ vars.PYTHON_OLD_MIN }}"  # For Oldest Python versions
@@ -79,18 +79,18 @@ jobs:
           path: rustpython
           # ref: 
           sparse-checkout-cone-mode: false
-     - id: cpython
-       name: Fetch Cpython
-       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-       with:
-         persist-credentials: false
-         fetch-tags: true
-         repository: "python/cpython"
-         path: cpython
-         sparse-checkout: |
-           Lib/test
-         sparse-checkout-cone-mode: true
-      # checkout ${{ matrix.python-version }}
+      - id: cpython
+        name: Fetch Cpython
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-tags: true
+          repository: "python/cpython"
+          path: cpython
+          sparse-checkout: |
+            Lib/test
+          sparse-checkout-cone-mode: true
+        # checkout ${{ matrix.python-version }}
       - name: Enumerate Referance Lib Files
         id: reftestfiles
         shell: bash
