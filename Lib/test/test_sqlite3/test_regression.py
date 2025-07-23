@@ -150,8 +150,6 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaises(IndexError):
             con.execute("insert into foo(bar, baz) values (?, ?)", parameters)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_error_msg_decode_error(self):
         # When porting the module to Python 3.0, the error message about
         # decoding errors disappeared. This verifies they're back again.
@@ -265,8 +263,6 @@ class RegressionTests(unittest.TestCase):
         """
         self.assertRaises(TypeError, self.con, b"select 1")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_collation(self):
         def collation_cb(a, b):
             return 1
@@ -409,8 +405,6 @@ class RegressionTests(unittest.TestCase):
         del ref
         support.gc_collect()
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_del_isolation_level_segfault(self):
         with self.assertRaises(AttributeError):
             del self.con.isolation_level

@@ -61,7 +61,10 @@ mod _sqlite {
             PyInt, PyIntRef, PySlice, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef,
         },
         convert::IntoObject,
-        function::{ArgCallable, ArgIterable, FsPath, FuncArgs, OptionalArg, PyComparisonValue},
+        function::{
+            ArgCallable, ArgIterable, FsPath, FuncArgs, OptionalArg, PyComparisonValue,
+            PySetterValue,
+        },
         object::{Traverse, TraverseFn},
         protocol::{PyBuffer, PyIterReturn, PyMappingMethods, PySequence, PySequenceMethods},
         sliceable::{SaturatedSliceIter, SliceableSequenceOp},
@@ -1160,6 +1163,7 @@ mod _sqlite {
             callable: PyObjectRef,
             vm: &VirtualMachine,
         ) -> PyResult<()> {
+            name.ensure_valid_utf8(vm)?;
             let name = name.to_cstring(vm)?;
             let db = self.db_lock(vm)?;
             let Some(data) = CallbackData::new(callable.clone(), vm) else {
@@ -1357,22 +1361,32 @@ mod _sqlite {
             self.isolation_level.deref().map(|x| x.to_owned())
         }
         #[pygetset(setter)]
-        fn set_isolation_level(&self, val: Option<PyStrRef>, vm: &VirtualMachine) -> PyResult<()> {
-            if let Some(val) = &val {
-                begin_statement_ptr_from_isolation_level(val, vm)?;
-            }
+        fn set_isolation_level(
+            &self,
+            value: PySetterValue<Option<PyStrRef>>,
+            vm: &VirtualMachine,
+        ) -> PyResult<()> {
+            match value {
+                PySetterValue::Assign(value) => {
+                    if let Some(val_str) = &value {
+                        begin_statement_ptr_from_isolation_level(val_str, vm)?;
+                    }
 
-            // If setting isolation_level to None (auto-commit mode), commit any pending transaction
-            if val.is_none() {
-                let db = self.db_lock(vm)?;
-                if !db.is_autocommit() {
-                    // Keep the lock and call implicit_commit directly to avoid race conditions
-                    db.implicit_commit(vm)?;
+                    // If setting isolation_level to None (auto-commit mode), commit any pending transaction
+                    if value.is_none() {
+                        let db = self.db_lock(vm)?;
+                        if !db.is_autocommit() {
+                            // Keep the lock and call implicit_commit directly to avoid race conditions
+                            db.implicit_commit(vm)?;
+                        }
+                    }
+                    let _ = unsafe { self.isolation_level.swap(value) };
+                    Ok(())
                 }
+                PySetterValue::Delete => Err(vm.new_attribute_error(
+                    "'isolation_level' attribute cannot be deleted".to_owned(),
+                )),
             }
-
-            let _ = unsafe { self.isolation_level.swap(val) };
-            Ok(())
         }
 
         #[pygetset]
@@ -1819,8 +1833,15 @@ mod _sqlite {
                             let text_factory = zelf.connection.text_factory.to_owned();
 
                             if text_factory.is(PyStr::class(&vm.ctx)) {
-                                let text = String::from_utf8(text).map_err(|_| {
-                                    new_operational_error(vm, "not valid UTF-8".to_owned())
+                                let text = String::from_utf8(text).map_err(|err| {
+                                    let col_name = st.column_name(i);
+                                    let col_name_str = ptr_to_str(col_name, vm).unwrap_or("?");
+                                    let valid_up_to = err.utf8_error().valid_up_to();
+                                    let text_prefix = String::from_utf8_lossy(&err.as_bytes()[..valid_up_to]);
+                                    let msg = format!(
+                                        "Could not decode to UTF-8 column '{col_name_str}' with text '{text_prefix}'"
+                                    );
+                                    new_operational_error(vm, msg)
                                 })?;
                                 vm.ctx.new_str(text).into()
                             } else if text_factory.is(PyBytes::class(&vm.ctx)) {
@@ -3068,36 +3089,52 @@ mod _sqlite {
     }
 
     fn lstrip_sql(sql: &[u8]) -> Option<&[u8]> {
-        let mut pos = sql;
-        loop {
-            match pos.first()? {
+        let mut pos = 0;
+
+        // This loop is borrowed from the SQLite source code.
+        while let Some(t_char) = sql.get(pos) {
+            match t_char {
                 b' ' | b'\t' | b'\x0c' | b'\n' | b'\r' => {
-                    pos = &pos[1..];
+                    // Skip whitespace.
+                    pos += 1;
                 }
                 b'-' => {
-                    if *pos.get(1)? == b'-' {
-                        // line comments
-                        pos = &pos[2..];
-                        while *pos.first()? != b'\n' {
-                            pos = &pos[1..];
+                    // Skip line comments.
+                    if sql.get(pos + 1) == Some(&b'-') {
+                        pos += 2;
+                        while let Some(&ch) = sql.get(pos) {
+                            if ch == b'\n' {
+                                break;
+                            }
+                            pos += 1;
                         }
+                        let _ = sql.get(pos)?;
                     } else {
-                        return Some(pos);
+                        return Some(&sql[pos..]);
                     }
                 }
                 b'/' => {
-                    if *pos.get(1)? == b'*' {
-                        // c style comments
-                        pos = &pos[2..];
-                        while *pos.first()? != b'*' || *pos.get(1)? != b'/' {
-                            pos = &pos[1..];
+                    // Skip C style comments.
+                    if sql.get(pos + 1) == Some(&b'*') {
+                        pos += 2;
+                        while let Some(&ch) = sql.get(pos) {
+                            if ch == b'*' && sql.get(pos + 1) == Some(&b'/') {
+                                break;
+                            }
+                            pos += 1;
                         }
+                        let _ = sql.get(pos)?;
+                        pos += 2;
                     } else {
-                        return Some(pos);
+                        return Some(&sql[pos..]);
                     }
                 }
-                _ => return Some(pos),
+                _ => {
+                    return Some(&sql[pos..]);
+                }
             }
         }
+
+        None
     }
 }

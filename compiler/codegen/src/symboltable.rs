@@ -19,9 +19,7 @@ use ruff_python_ast::{
     Stmt, TypeParam, TypeParamParamSpec, TypeParamTypeVar, TypeParamTypeVarTuple, TypeParams,
 };
 use ruff_text_size::{Ranged, TextRange};
-use rustpython_compiler_source::{SourceCode, SourceLocation};
-// use rustpython_ast::{self as ast, located::Located};
-// use rustpython_parser_core::source_code::{LineNumber, SourceLocation};
+use rustpython_compiler_core::{SourceFile, SourceLocation};
 use std::{borrow::Cow, fmt};
 
 /// Captures all symbols in the current scope, and has a list of sub-scopes in this scope.
@@ -54,6 +52,9 @@ pub struct SymbolTable {
 
     /// Whether this class scope needs an implicit __classdict__ cell
     pub needs_classdict: bool,
+
+    /// Whether this type param scope can see the parent class scope
+    pub can_see_class_scope: bool,
 }
 
 impl SymbolTable {
@@ -68,22 +69,24 @@ impl SymbolTable {
             varnames: Vec::new(),
             needs_class_closure: false,
             needs_classdict: false,
+            can_see_class_scope: false,
         }
     }
 
-    pub fn scan_program(
-        program: &ModModule,
-        source_code: SourceCode<'_>,
-    ) -> SymbolTableResult<Self> {
-        let mut builder = SymbolTableBuilder::new(source_code);
+    pub fn scan_program(program: &ModModule, source_file: SourceFile) -> SymbolTableResult<Self> {
+        let mut builder = SymbolTableBuilder::new(source_file);
         builder.scan_statements(program.body.as_ref())?;
         builder.finish()
     }
 
-    pub fn scan_expr(expr: &ModExpression, source_code: SourceCode<'_>) -> SymbolTableResult<Self> {
-        let mut builder = SymbolTableBuilder::new(source_code);
+    pub fn scan_expr(expr: &ModExpression, source_file: SourceFile) -> SymbolTableResult<Self> {
+        let mut builder = SymbolTableBuilder::new(source_file);
         builder.scan_expression(expr.body.as_ref(), ExpressionContext::Load)?;
         builder.finish()
+    }
+
+    pub fn lookup(&self, name: &str) -> Option<&Symbol> {
+        self.symbols.get(name)
     }
 }
 
@@ -211,12 +214,6 @@ impl SymbolTableError {
 }
 
 type SymbolTableResult<T = ()> = Result<T, SymbolTableError>;
-
-impl SymbolTable {
-    pub fn lookup(&self, name: &str) -> Option<&Symbol> {
-        self.symbols.get(name)
-    }
-}
 
 impl std::fmt::Debug for SymbolTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -606,12 +603,12 @@ enum SymbolUsage {
     TypeParam,
 }
 
-struct SymbolTableBuilder<'src> {
+struct SymbolTableBuilder {
     class_name: Option<String>,
     // Scope stack.
     tables: Vec<SymbolTable>,
     future_annotations: bool,
-    source_code: SourceCode<'src>,
+    source_file: SourceFile,
     // Current scope's varnames being collected (temporary storage)
     current_varnames: Vec<String>,
 }
@@ -629,21 +626,19 @@ enum ExpressionContext {
     IterDefinitionExp,
 }
 
-impl<'src> SymbolTableBuilder<'src> {
-    fn new(source_code: SourceCode<'src>) -> Self {
+impl SymbolTableBuilder {
+    fn new(source_file: SourceFile) -> Self {
         let mut this = Self {
             class_name: None,
             tables: vec![],
             future_annotations: false,
-            source_code,
+            source_file,
             current_varnames: Vec::new(),
         };
         this.enter_scope("top", CompilerScope::Module, 0);
         this
     }
-}
 
-impl SymbolTableBuilder<'_> {
     fn finish(mut self) -> Result<SymbolTable, SymbolTableError> {
         assert_eq!(self.tables.len(), 1);
         let mut symbol_table = self.tables.pop().unwrap();
@@ -665,6 +660,31 @@ impl SymbolTableBuilder<'_> {
         self.current_varnames.clear();
     }
 
+    fn enter_type_param_block(&mut self, name: &str, line_number: u32) -> SymbolTableResult {
+        // Check if we're in a class scope
+        let in_class = self
+            .tables
+            .last()
+            .is_some_and(|t| t.typ == CompilerScope::Class);
+
+        self.enter_scope(name, CompilerScope::TypeParams, line_number);
+
+        // If we're in a class, mark that this type param scope can see the class scope
+        if let Some(table) = self.tables.last_mut() {
+            table.can_see_class_scope = in_class;
+
+            // Add __classdict__ as a USE symbol in type param scope if in class
+            if in_class {
+                self.register_name("__classdict__", SymbolUsage::Used, TextRange::default())?;
+            }
+        }
+
+        // Register .type_params as a SET symbol (it will be converted to cell variable later)
+        self.register_name(".type_params", SymbolUsage::Assigned, TextRange::default())?;
+
+        Ok(())
+    }
+
     /// Pop symbol table and add to sub table of parent table.
     fn leave_scope(&mut self) {
         let mut table = self.tables.pop().unwrap();
@@ -674,7 +694,10 @@ impl SymbolTableBuilder<'_> {
     }
 
     fn line_index_start(&self, range: TextRange) -> u32 {
-        self.source_code.line_index(range.start()).get() as _
+        self.source_file
+            .to_source_code()
+            .line_index(range.start())
+            .get() as _
     }
 
     fn scan_statements(&mut self, statements: &[Stmt]) -> SymbolTableResult {
@@ -746,12 +769,10 @@ impl SymbolTableBuilder<'_> {
                     self.scan_annotation(expression)?;
                 }
                 if let Some(type_params) = type_params {
-                    self.enter_scope(
+                    self.enter_type_param_block(
                         &format!("<generic parameters of {}>", name.as_str()),
-                        CompilerScope::TypeParams,
-                        // FIXME: line no
-                        self.line_index_start(*range),
-                    );
+                        self.line_index_start(type_params.range),
+                    )?;
                     self.scan_type_params(type_params)?;
                 }
                 self.enter_scope_with_parameters(
@@ -774,11 +795,10 @@ impl SymbolTableBuilder<'_> {
                 range,
             }) => {
                 if let Some(type_params) = type_params {
-                    self.enter_scope(
+                    self.enter_type_param_block(
                         &format!("<generic parameters of {}>", name.as_str()),
-                        CompilerScope::TypeParams,
                         self.line_index_start(type_params.range),
-                    );
+                    )?;
                     self.scan_type_params(type_params)?;
                 }
                 self.enter_scope(
@@ -965,12 +985,10 @@ impl SymbolTableBuilder<'_> {
                 ..
             }) => {
                 if let Some(type_params) = type_params {
-                    self.enter_scope(
-                        // &name.to_string(),
+                    self.enter_type_param_block(
                         "TypeAlias",
-                        CompilerScope::TypeParams,
                         self.line_index_start(type_params.range),
-                    );
+                    )?;
                     self.scan_type_params(type_params)?;
                     self.scan_expression(value, ExpressionContext::Load)?;
                     self.leave_scope();
@@ -1012,6 +1030,30 @@ impl SymbolTableBuilder<'_> {
         context: ExpressionContext,
     ) -> SymbolTableResult {
         use ruff_python_ast::*;
+
+        // Check for expressions not allowed in type parameters scope
+        if let Some(table) = self.tables.last() {
+            if table.typ == CompilerScope::TypeParams {
+                if let Some(keyword) = match expression {
+                    Expr::Yield(_) | Expr::YieldFrom(_) => Some("yield"),
+                    Expr::Await(_) => Some("await"),
+                    Expr::Named(_) => Some("named"),
+                    _ => None,
+                } {
+                    return Err(SymbolTableError {
+                        error: format!(
+                            "{keyword} expression cannot be used within a type parameter"
+                        ),
+                        location: Some(
+                            self.source_file
+                                .to_source_code()
+                                .source_location(expression.range().start()),
+                        ),
+                    });
+                }
+            }
+        }
+
         match expression {
             Expr::BinOp(ExprBinOp {
                 left,
@@ -1243,7 +1285,7 @@ impl SymbolTableBuilder<'_> {
                 if let ExpressionContext::IterDefinitionExp = context {
                     return Err(SymbolTableError {
                           error: "assignment expression cannot be used in a comprehension iterable expression".to_string(),
-                          location: Some(self.source_code.source_location(target.range().start())),
+                          location: Some(self.source_file.to_source_code().source_location(target.range().start())),
                       });
                 }
 
@@ -1322,6 +1364,26 @@ impl SymbolTableBuilder<'_> {
         Ok(())
     }
 
+    /// Scan type parameter bound or default in a separate scope
+    // = symtable_visit_type_param_bound_or_default
+    fn scan_type_param_bound_or_default(&mut self, expr: &Expr, name: &str) -> SymbolTableResult {
+        // Enter a new TypeParams scope for the bound/default expression
+        // This allows the expression to access outer scope symbols
+        let line_number = self.line_index_start(expr.range());
+        self.enter_scope(name, CompilerScope::TypeParams, line_number);
+
+        // Note: In CPython, can_see_class_scope is preserved in the new scope
+        // In RustPython, this is handled through the scope hierarchy
+
+        // Scan the expression in this new scope
+        let result = self.scan_expression(expr, ExpressionContext::Load);
+
+        // Exit the scope
+        self.leave_scope();
+
+        result
+    }
+
     fn scan_type_params(&mut self, type_params: &TypeParams) -> SymbolTableResult {
         // Register .type_params as a type parameter (automatically becomes cell variable)
         self.register_name(".type_params", SymbolUsage::TypeParam, type_params.range)?;
@@ -1333,26 +1395,51 @@ impl SymbolTableBuilder<'_> {
                     name,
                     bound,
                     range: type_var_range,
-                    ..
+                    default,
                 }) => {
                     self.register_name(name.as_str(), SymbolUsage::TypeParam, *type_var_range)?;
+
+                    // Process bound in a separate scope
                     if let Some(binding) = bound {
-                        self.scan_expression(binding, ExpressionContext::Load)?;
+                        let scope_name = if binding.is_tuple_expr() {
+                            format!("<TypeVar constraint of {name}>")
+                        } else {
+                            format!("<TypeVar bound of {name}>")
+                        };
+                        self.scan_type_param_bound_or_default(binding, &scope_name)?;
+                    }
+
+                    // Process default in a separate scope
+                    if let Some(default_value) = default {
+                        let scope_name = format!("<TypeVar default of {name}>");
+                        self.scan_type_param_bound_or_default(default_value, &scope_name)?;
                     }
                 }
                 TypeParam::ParamSpec(TypeParamParamSpec {
                     name,
                     range: param_spec_range,
-                    ..
+                    default,
                 }) => {
                     self.register_name(name, SymbolUsage::TypeParam, *param_spec_range)?;
+
+                    // Process default in a separate scope
+                    if let Some(default_value) = default {
+                        let scope_name = format!("<ParamSpec default of {name}>");
+                        self.scan_type_param_bound_or_default(default_value, &scope_name)?;
+                    }
                 }
                 TypeParam::TypeVarTuple(TypeParamTypeVarTuple {
                     name,
                     range: type_var_tuple_range,
-                    ..
+                    default,
                 }) => {
                     self.register_name(name, SymbolUsage::TypeParam, *type_var_tuple_range)?;
+
+                    // Process default in a separate scope
+                    if let Some(default_value) = default {
+                        let scope_name = format!("<TypeVarTuple default of {name}>");
+                        self.scan_type_param_bound_or_default(default_value, &scope_name)?;
+                    }
                 }
             }
         }
@@ -1478,7 +1565,10 @@ impl SymbolTableBuilder<'_> {
         role: SymbolUsage,
         range: TextRange,
     ) -> SymbolTableResult {
-        let location = self.source_code.source_location(range.start());
+        let location = self
+            .source_file
+            .to_source_code()
+            .source_location(range.start());
         let location = Some(location);
         let scope_depth = self.tables.len();
         let table = self.tables.last_mut().unwrap();

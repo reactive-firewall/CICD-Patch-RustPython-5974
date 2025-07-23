@@ -16,13 +16,13 @@ use crate::{
     function::{ArgMapping, Either, FuncArgs},
     protocol::{PyIter, PyIterReturn},
     scope::Scope,
-    source::SourceLocation,
     stdlib::{builtins, typing},
     vm::{Context, PyMethod},
 };
 use indexmap::IndexMap;
 use itertools::Itertools;
 use rustpython_common::wtf8::Wtf8Buf;
+use rustpython_compiler_core::SourceLocation;
 #[cfg(feature = "threading")]
 use std::sync::atomic;
 use std::{fmt, iter::zip};
@@ -697,8 +697,11 @@ impl ExecutingFrame<'_> {
             }
             bytecode::Instruction::Swap { index } => {
                 let len = self.state.stack.len();
-                let i = len - 1;
-                let j = len - 1 - index.get(arg) as usize;
+                let i = len - 1; // TOS index
+                let index_val = index.get(arg) as usize;
+                // SWAP(i) swaps TOS with element i positions down from TOS
+                // So the target index is len - index_val
+                let j = len - index_val;
                 self.state.stack.swap(i, j);
                 Ok(None)
             }
@@ -2258,6 +2261,13 @@ impl ExecutingFrame<'_> {
 
                 let type_alias = typing::TypeAliasType::new(name, type_params, value);
                 Ok(type_alias.into_ref(&vm.ctx).into())
+            }
+            bytecode::IntrinsicFunction1::ListToTuple => {
+                // Convert list to tuple
+                let list = arg
+                    .downcast::<PyList>()
+                    .map_err(|_| vm.new_type_error("LIST_TO_TUPLE expects a list"))?;
+                Ok(vm.ctx.new_tuple(list.borrow_vec().to_vec()).into())
             }
         }
     }

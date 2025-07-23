@@ -1,10 +1,12 @@
 use std::ops;
 
-use crate::error::InternalError;
-use crate::{IndexMap, IndexSet};
-use ruff_source_file::{OneIndexed, SourceLocation};
-use rustpython_compiler_core::bytecode::{
-    CodeFlags, CodeObject, CodeUnit, ConstantData, InstrDisplayContext, Instruction, Label, OpArg,
+use crate::{IndexMap, IndexSet, error::InternalError};
+use rustpython_compiler_core::{
+    OneIndexed, SourceLocation,
+    bytecode::{
+        CodeFlags, CodeObject, CodeUnit, ConstantData, InstrDisplayContext, Instruction, Label,
+        OpArg,
+    },
 };
 
 /// Metadata for a code unit
@@ -34,23 +36,29 @@ impl BlockIdx {
         self.0 as usize
     }
 }
+
 impl ops::Index<BlockIdx> for [Block] {
     type Output = Block;
+
     fn index(&self, idx: BlockIdx) -> &Block {
         &self[idx.idx()]
     }
 }
+
 impl ops::IndexMut<BlockIdx> for [Block] {
     fn index_mut(&mut self, idx: BlockIdx) -> &mut Block {
         &mut self[idx.idx()]
     }
 }
+
 impl ops::Index<BlockIdx> for Vec<Block> {
     type Output = Block;
+
     fn index(&self, idx: BlockIdx) -> &Block {
         &self[idx.idx()]
     }
 }
+
 impl ops::IndexMut<BlockIdx> for Vec<Block> {
     fn index_mut(&mut self, idx: BlockIdx) -> &mut Block {
         &mut self[idx.idx()]
@@ -74,6 +82,7 @@ pub struct Block {
     pub instructions: Vec<InstructionInfo>,
     pub next: BlockIdx,
 }
+
 impl Default for Block {
     fn default() -> Self {
         Self {
@@ -101,7 +110,11 @@ pub struct CodeInfo {
 
     // Block stack for tracking nested control structures
     pub fblock: Vec<crate::compile::FBlockInfo>,
+
+    // Reference to the symbol table for this scope
+    pub symbol_table_index: usize,
 }
+
 impl CodeInfo {
     pub fn finalize_code(mut self, optimize: u8) -> crate::InternalResult<CodeObject> {
         if optimize > 0 {
@@ -122,6 +135,7 @@ impl CodeInfo {
             static_attributes: _,
             in_inlined_comp: _,
             fblock: _,
+            symbol_table_index: _,
         } = self;
 
         let CodeUnitMetadata {
@@ -318,7 +332,10 @@ impl CodeInfo {
                     continue 'process_blocks;
                 }
             }
-            stackdepth_push(&mut stack, &mut start_depths, block.next, depth);
+            // Only push next block if it's not NULL
+            if block.next != BlockIdx::NULL {
+                stackdepth_push(&mut stack, &mut start_depths, block.next, depth);
+            }
         }
         if DEBUG {
             eprintln!("DONE: {maxdepth}");

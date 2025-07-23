@@ -1,14 +1,13 @@
 //! Implement python as a virtual machine with bytecode. This module
 //! implements bytecode structure.
 
+use crate::{OneIndexed, SourceLocation};
 use bitflags::bitflags;
 use itertools::Itertools;
 use malachite_bigint::BigInt;
 use num_complex::Complex64;
-use ruff_source_file::{OneIndexed, SourceLocation};
 use rustpython_wtf8::{Wtf8, Wtf8Buf};
-use std::marker::PhantomData;
-use std::{collections::BTreeSet, fmt, hash, mem};
+use std::{collections::BTreeSet, fmt, hash, marker::PhantomData, mem};
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 #[repr(i8)]
@@ -392,8 +391,15 @@ op_arg_enum!(
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     #[repr(u8)]
     pub enum IntrinsicFunction1 {
+        // Invalid = 0,
+        // Print = 1,
         /// Import * operation
         ImportStar = 2,
+        // StopIterationError = 3,
+        // AsyncGenWrap = 4,
+        // UnaryPositive = 5,
+        /// Convert list to tuple
+        ListToTuple = 6,
         /// Type parameter related
         TypeVar = 7,
         ParamSpec = 8,

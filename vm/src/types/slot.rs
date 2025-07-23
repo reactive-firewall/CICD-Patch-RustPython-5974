@@ -122,6 +122,7 @@ bitflags! {
     #[derive(Copy, Clone, Debug, PartialEq)]
     #[non_exhaustive]
     pub struct PyTypeFlags: u64 {
+        const MANAGED_DICT = 1 << 4;
         const IMMUTABLETYPE = 1 << 8;
         const HEAPTYPE = 1 << 9;
         const BASETYPE = 1 << 10;
@@ -285,7 +286,10 @@ fn getattro_wrapper(zelf: &PyObject, name: &Py<PyStr>, vm: &VirtualMachine) -> P
     let __getattr__ = identifier!(vm, __getattr__);
     match vm.call_special_method(zelf, __getattribute__, (name.to_owned(),)) {
         Ok(r) => Ok(r),
-        Err(_) if zelf.class().has_attr(__getattr__) => {
+        Err(e)
+            if e.fast_isinstance(vm.ctx.exceptions.attribute_error)
+                && zelf.class().has_attr(__getattr__) =>
+        {
             vm.call_special_method(zelf, __getattr__, (name.to_owned(),))
         }
         Err(e) => Err(e),
