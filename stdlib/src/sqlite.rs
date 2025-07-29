@@ -1640,6 +1640,8 @@ mod _sqlite {
             script: PyStrRef,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Self>> {
+            script.ensure_valid_utf8(vm)?;
+
             let db = zelf.connection.db_lock(vm)?;
 
             db.sql_limit(script.byte_len(), vm)?;
@@ -2143,13 +2145,16 @@ mod _sqlite {
         }
 
         #[pymethod]
-        fn __enter__(zelf: PyRef<Self>) -> PyRef<Self> {
-            zelf
+        fn __enter__(zelf: PyRef<Self>, vm: &VirtualMachine) -> PyResult<PyRef<Self>> {
+            let _ = zelf.inner(vm)?;
+            Ok(zelf)
         }
 
         #[pymethod]
-        fn __exit__(&self, _args: FuncArgs) {
-            self.close()
+        fn __exit__(&self, _args: FuncArgs, vm: &VirtualMachine) -> PyResult<()> {
+            let _ = self.inner(vm)?;
+            self.close();
+            Ok(())
         }
 
         fn inner(&self, vm: &VirtualMachine) -> PyResult<PyMappedMutexGuard<'_, BlobInner>> {
@@ -2236,11 +2241,12 @@ mod _sqlite {
             vm: &VirtualMachine,
         ) -> PyResult<()> {
             let Some(value) = value else {
-                return Err(vm.new_type_error("Blob doesn't support deletion"));
+                return Err(vm.new_type_error("Blob doesn't support slice deletion"));
             };
             let inner = self.inner(vm)?;
 
             if let Some(index) = needle.try_index_opt(vm) {
+                // Handle single item assignment: blob[i] = b
                 let Some(value) = value.downcast_ref::<PyInt>() else {
                     return Err(vm.new_type_error(format!(
                         "'{}' object cannot be interpreted as an integer",
@@ -2253,11 +2259,61 @@ mod _sqlite {
                 Self::expect_write(blob_len, 1, index, vm)?;
                 let ret = inner.blob.write_single(value, index);
                 self.check(ret, vm)
-            } else if let Some(_slice) = needle.downcast_ref::<PySlice>() {
-                Err(vm.new_not_implemented_error("Blob slice assignment is not implemented"))
-                // let blob_len = inner.blob.bytes();
-                // let slice = slice.to_saturated(vm)?;
-                // let (range, step, length) = slice.adjust_indices(blob_len as usize);
+            } else if let Some(slice) = needle.downcast_ref::<PySlice>() {
+                // Handle slice assignment: blob[a:b:c] = b"..."
+                let value_buf = PyBuffer::try_from_borrowed_object(vm, &value)?;
+
+                let buf = value_buf
+                    .as_contiguous()
+                    .ok_or_else(|| vm.new_buffer_error("underlying buffer is not C-contiguous"))?;
+
+                let blob_len = inner.blob.bytes();
+                let slice = slice.to_saturated(vm)?;
+                let (range, step, slice_len) = slice.adjust_indices(blob_len as usize);
+
+                if step == 0 {
+                    return Err(vm.new_value_error("slice step cannot be zero"));
+                }
+
+                if buf.len() != slice_len {
+                    return Err(vm.new_index_error("Blob slice assignment is wrong size"));
+                }
+
+                if slice_len == 0 {
+                    return Ok(());
+                }
+
+                if step == 1 {
+                    let ret = inner.blob.write(
+                        buf.as_ptr().cast(),
+                        buf.len() as c_int,
+                        range.start as c_int,
+                    );
+                    self.check(ret, vm)
+                } else {
+                    let span_len = range.end - range.start;
+                    let mut temp_buf = vec![0u8; span_len];
+
+                    let ret = inner.blob.read(
+                        temp_buf.as_mut_ptr().cast(),
+                        span_len as c_int,
+                        range.start as c_int,
+                    );
+                    self.check(ret, vm)?;
+
+                    let mut i_in_temp: usize = 0;
+                    for i_in_src in 0..slice_len {
+                        temp_buf[i_in_temp] = buf[i_in_src];
+                        i_in_temp += step as usize;
+                    }
+
+                    let ret = inner.blob.write(
+                        temp_buf.as_ptr().cast(),
+                        span_len as c_int,
+                        range.start as c_int,
+                    );
+                    self.check(ret, vm)
+                }
             } else {
                 Err(vm.new_type_error("Blob indices must be integers"))
             }
@@ -2723,7 +2779,15 @@ mod _sqlite {
                 let name = unsafe { name.add(1) };
                 let name = ptr_to_str(name, vm)?;
 
-                let val = dict.get_item(name, vm)?;
+                let val = match dict.get_item_opt(name, vm)? {
+                    Some(val) => val,
+                    None => {
+                        return Err(new_programming_error(
+                            vm,
+                            format!("You did not supply a value for binding parameter :{name}.",),
+                        ));
+                    }
+                };
 
                 self.bind_parameter(i, &val, vm)?;
             }
