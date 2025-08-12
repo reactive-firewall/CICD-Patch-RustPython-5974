@@ -346,8 +346,6 @@ class ModuleTests(unittest.TestCase):
                              sqlite.SQLITE_CONSTRAINT_CHECK)
             self.assertEqual(exc.sqlite_errorname, "SQLITE_CONSTRAINT_CHECK")
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_disallow_instantiation(self):
         cx = sqlite.connect(":memory:")
         check_disallow_instantiation(self, type(cx("select 1")))
@@ -1423,8 +1421,6 @@ class BlobTests(unittest.TestCase):
         with self.assertRaises(BufferError):
             self.blob[5:10] = memoryview(b"abcde")[::2]
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_blob_sequence_not_supported(self):
         with self.assertRaisesRegex(TypeError, "unsupported operand"):
             self.blob + self.blob
@@ -1744,8 +1740,6 @@ class ClosedConTests(unittest.TestCase):
         with self.assertRaises(sqlite.ProgrammingError):
             con.set_progress_handler(progress, 100)
 
-    # TODO: RUSTPYTHON
-    @unittest.expectedFailure
     def test_closed_call(self):
         con = sqlite.connect(":memory:")
         con.close()

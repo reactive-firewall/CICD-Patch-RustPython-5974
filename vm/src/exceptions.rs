@@ -198,15 +198,11 @@ impl VirtualMachine {
         let mut filename_suffix = String::new();
 
         if let Some(lineno) = maybe_lineno {
-            writeln!(
-                output,
-                r##"  File "{}", line {}"##,
-                maybe_filename
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("<string>"),
-                lineno
-            )?;
+            let filename = match maybe_filename {
+                Some(filename) => filename,
+                None => vm.ctx.new_str("<string>"),
+            };
+            writeln!(output, r##"  File "{filename}", line {lineno}"##,)?;
         } else if let Some(filename) = maybe_filename {
             filename_suffix = format!(" ({filename})");
         }
@@ -927,8 +923,6 @@ impl ExceptionZoo {
 
         extend_exception!(PyImportError, ctx, excs.import_error, {
             "msg" => ctx.new_readonly_getset("msg", excs.import_error, make_arg_getter(0)),
-            "name" => ctx.none(),
-            "path" => ctx.none(),
         });
         extend_exception!(PyModuleNotFoundError, ctx, excs.module_not_found_error);
 
@@ -1368,8 +1362,9 @@ pub(super) mod types {
                 )));
             }
 
-            zelf.set_attr("name", vm.unwrap_or_none(name), vm)?;
-            zelf.set_attr("path", vm.unwrap_or_none(path), vm)?;
+            let dict = zelf.dict().unwrap();
+            dict.set_item("name", vm.unwrap_or_none(name), vm)?;
+            dict.set_item("path", vm.unwrap_or_none(path), vm)?;
             PyBaseException::slot_init(zelf, args, vm)
         }
         #[pymethod]
@@ -1498,7 +1493,7 @@ pub(super) mod types {
             let args = exc.args();
             let obj = exc.as_object().to_owned();
 
-            if args.len() == 2 {
+            let str = if args.len() == 2 {
                 // SAFETY: len() == 2 is checked so get_arg 1 or 2 won't panic
                 let errno = exc.get_arg(0).unwrap().str(vm)?;
                 let msg = exc.get_arg(1).unwrap().str(vm)?;
@@ -1518,10 +1513,11 @@ pub(super) mod types {
                         format!("[Errno {errno}] {msg}")
                     }
                 };
-                Ok(vm.ctx.new_str(s))
+                vm.ctx.new_str(s)
             } else {
-                Ok(exc.__str__(vm))
-            }
+                exc.__str__(vm)
+            };
+            Ok(str)
         }
 
         #[pymethod]

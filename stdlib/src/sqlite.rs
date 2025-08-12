@@ -20,6 +20,7 @@ pub(crate) fn make_module(vm: &VirtualMachine) -> PyRef<PyModule> {
 
 #[pymodule]
 mod _sqlite {
+    use crossbeam_utils::atomic::AtomicCell;
     use libsqlite3_sys::{
         SQLITE_BLOB, SQLITE_DETERMINISTIC, SQLITE_FLOAT, SQLITE_INTEGER, SQLITE_NULL,
         SQLITE_OPEN_CREATE, SQLITE_OPEN_READWRITE, SQLITE_OPEN_URI, SQLITE_TEXT, SQLITE_TRACE_STMT,
@@ -59,6 +60,7 @@ mod _sqlite {
         builtins::{
             PyBaseException, PyBaseExceptionRef, PyByteArray, PyBytes, PyDict, PyDictRef, PyFloat,
             PyInt, PyIntRef, PySlice, PyStr, PyStrRef, PyTuple, PyTupleRef, PyType, PyTypeRef,
+            PyUtf8Str, PyUtf8StrRef,
         },
         convert::IntoObject,
         function::{
@@ -66,11 +68,14 @@ mod _sqlite {
             PySetterValue,
         },
         object::{Traverse, TraverseFn},
-        protocol::{PyBuffer, PyIterReturn, PyMappingMethods, PySequence, PySequenceMethods},
+        protocol::{
+            PyBuffer, PyIterReturn, PyMappingMethods, PyNumberMethods, PySequence,
+            PySequenceMethods,
+        },
         sliceable::{SaturatedSliceIter, SliceableSequenceOp},
         types::{
-            AsMapping, AsSequence, Callable, Comparable, Constructor, Hashable, IterNext, Iterable,
-            PyComparisonOp, SelfIter,
+            AsMapping, AsNumber, AsSequence, Callable, Comparable, Constructor, Hashable, IterNext,
+            Iterable, PyComparisonOp, SelfIter, Unconstructible,
         },
         utils::ToCString,
     };
@@ -851,10 +856,14 @@ mod _sqlite {
     }
 
     impl Callable for Connection {
-        type Args = (PyStrRef,);
+        type Args = FuncArgs;
 
         fn call(zelf: &Py<Self>, args: Self::Args, vm: &VirtualMachine) -> PyResult {
-            if let Some(stmt) = Statement::new(zelf, args.0, vm)? {
+            let _ = zelf.db_lock(vm)?;
+
+            let (sql,): (PyUtf8StrRef,) = args.bind(vm)?;
+
+            if let Some(stmt) = Statement::new(zelf, sql, vm)? {
                 Ok(stmt.into_ref(&vm.ctx).into())
             } else {
                 Ok(vm.ctx.none())
@@ -986,7 +995,7 @@ mod _sqlite {
         #[pymethod]
         fn execute(
             zelf: PyRef<Self>,
-            sql: PyStrRef,
+            sql: PyUtf8StrRef,
             parameters: OptionalArg<PyObjectRef>,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Cursor>> {
@@ -998,7 +1007,7 @@ mod _sqlite {
         #[pymethod]
         fn executemany(
             zelf: PyRef<Self>,
-            sql: PyStrRef,
+            sql: PyUtf8StrRef,
             seq_of_params: ArgIterable,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Cursor>> {
@@ -1010,7 +1019,7 @@ mod _sqlite {
         #[pymethod]
         fn executescript(
             zelf: PyRef<Self>,
-            script: PyStrRef,
+            script: PyUtf8StrRef,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Cursor>> {
             let row_factory = zelf.row_factory.to_owned();
@@ -1159,11 +1168,10 @@ mod _sqlite {
         #[pymethod]
         fn create_collation(
             &self,
-            name: PyStrRef,
+            name: PyUtf8StrRef,
             callable: PyObjectRef,
             vm: &VirtualMachine,
         ) -> PyResult<()> {
-            name.ensure_valid_utf8(vm)?;
             let name = name.to_cstring(vm)?;
             let db = self.db_lock(vm)?;
             let Some(data) = CallbackData::new(callable.clone(), vm) else {
@@ -1491,7 +1499,7 @@ mod _sqlite {
         #[pymethod]
         fn execute(
             zelf: PyRef<Self>,
-            sql: PyStrRef,
+            sql: PyUtf8StrRef,
             parameters: OptionalArg<PyObjectRef>,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Self>> {
@@ -1563,7 +1571,7 @@ mod _sqlite {
         #[pymethod]
         fn executemany(
             zelf: PyRef<Self>,
-            sql: PyStrRef,
+            sql: PyUtf8StrRef,
             seq_of_params: ArgIterable,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Self>> {
@@ -1637,11 +1645,9 @@ mod _sqlite {
         #[pymethod]
         fn executescript(
             zelf: PyRef<Self>,
-            script: PyStrRef,
+            script: PyUtf8StrRef,
             vm: &VirtualMachine,
         ) -> PyResult<PyRef<Self>> {
-            script.ensure_valid_utf8(vm)?;
-
             let db = zelf.connection.db_lock(vm)?;
 
             db.sql_limit(script.byte_len(), vm)?;
@@ -2034,13 +2040,15 @@ mod _sqlite {
     }
 
     #[pyattr]
-    #[pyclass(name, traverse)]
+    #[pyclass(module = "sqlite3", name = "Blob", traverse)]
     #[derive(Debug, PyPayload)]
     struct Blob {
         connection: PyRef<Connection>,
         #[pytraverse(skip)]
         inner: PyMutex<Option<BlobInner>>,
     }
+
+    impl Unconstructible for Blob {}
 
     #[derive(Debug)]
     struct BlobInner {
@@ -2054,7 +2062,7 @@ mod _sqlite {
         }
     }
 
-    #[pyclass(with(AsMapping))]
+    #[pyclass(with(AsMapping, Unconstructible, AsNumber, AsSequence))]
     impl Blob {
         #[pymethod]
         fn close(&self) {
@@ -2345,6 +2353,50 @@ mod _sqlite {
         }
     }
 
+    impl AsNumber for Blob {
+        fn as_number() -> &'static PyNumberMethods {
+            static AS_NUMBER: PyNumberMethods = PyNumberMethods {
+                add: Some(|a, b, vm| {
+                    Err(vm.new_type_error(format!(
+                        "unsupported operand type(s) for +: '{}' and '{}'",
+                        a.class().name(),
+                        b.class().name()
+                    )))
+                }),
+                multiply: Some(|a, b, vm| {
+                    Err(vm.new_type_error(format!(
+                        "unsupported operand type(s) for *: '{}' and '{}'",
+                        a.class().name(),
+                        b.class().name()
+                    )))
+                }),
+                ..PyNumberMethods::NOT_IMPLEMENTED
+            };
+            &AS_NUMBER
+        }
+    }
+
+    impl AsSequence for Blob {
+        fn as_sequence() -> &'static PySequenceMethods {
+            static AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
+                length: AtomicCell::new(None),
+                concat: AtomicCell::new(None),
+                repeat: AtomicCell::new(None),
+                item: AtomicCell::new(None),
+                ass_item: AtomicCell::new(None),
+                contains: atomic_func!(|seq, _needle, vm| {
+                    Err(vm.new_type_error(format!(
+                        "argument of type '{}' is not iterable",
+                        seq.obj.class().name(),
+                    )))
+                }),
+                inplace_concat: AtomicCell::new(None),
+                inplace_repeat: AtomicCell::new(None),
+            };
+            &AS_SEQUENCE
+        }
+    }
+
     #[pyattr]
     #[pyclass(name)]
     #[derive(Debug, PyPayload)]
@@ -2354,7 +2406,7 @@ mod _sqlite {
     impl PrepareProtocol {}
 
     #[pyattr]
-    #[pyclass(name)]
+    #[pyclass(module = "sqlite3", name = "Statement")]
     #[derive(PyPayload)]
     struct Statement {
         st: PyMutex<SqliteStatement>,
@@ -2371,14 +2423,15 @@ mod _sqlite {
         }
     }
 
-    #[pyclass()]
+    impl Unconstructible for Statement {}
+
+    #[pyclass(with(Unconstructible))]
     impl Statement {
         fn new(
             connection: &Connection,
-            sql: PyStrRef,
+            sql: PyUtf8StrRef,
             vm: &VirtualMachine,
         ) -> PyResult<Option<Self>> {
-            let sql = sql.try_into_utf8(vm)?;
             if sql.as_str().contains('\0') {
                 return Err(new_programming_error(
                     vm,
@@ -2731,6 +2784,7 @@ mod _sqlite {
                 let val = val.to_f64();
                 unsafe { sqlite3_bind_double(self.st, pos, val) }
             } else if let Some(val) = obj.downcast_ref::<PyStr>() {
+                let val = val.try_as_utf8(vm)?;
                 let (ptr, len) = str_to_ptr_len(val, vm)?;
                 unsafe { sqlite3_bind_text(self.st, pos, ptr, len, SQLITE_TRANSIENT()) }
             } else if let Ok(buffer) = PyBuffer::try_from_borrowed_object(vm, obj) {
@@ -2990,6 +3044,7 @@ mod _sqlite {
                 } else if let Some(val) = val.downcast_ref::<PyFloat>() {
                     sqlite3_result_double(self.ctx, val.to_f64())
                 } else if let Some(val) = val.downcast_ref::<PyStr>() {
+                    let val = val.try_as_utf8(vm)?;
                     let (ptr, len) = str_to_ptr_len(val, vm)?;
                     sqlite3_result_text(self.ctx, ptr, len, SQLITE_TRANSIENT())
                 } else if let Ok(buffer) = PyBuffer::try_from_borrowed_object(vm, val) {
@@ -3070,8 +3125,8 @@ mod _sqlite {
         }
     }
 
-    fn str_to_ptr_len(s: &PyStr, vm: &VirtualMachine) -> PyResult<(*const libc::c_char, i32)> {
-        let s_str = s.try_to_str(vm)?;
+    fn str_to_ptr_len(s: &PyUtf8Str, vm: &VirtualMachine) -> PyResult<(*const libc::c_char, i32)> {
+        let s_str = s.as_str();
         let len = c_int::try_from(s_str.len())
             .map_err(|_| vm.new_overflow_error("TEXT longer than INT_MAX bytes"))?;
         let ptr = s_str.as_ptr().cast();

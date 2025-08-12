@@ -341,7 +341,7 @@ impl ExecutingFrame<'_> {
     }
 
     #[inline(always)]
-    fn lasti(&self) -> u32 {
+    const fn lasti(&self) -> u32 {
         #[cfg(feature = "threading")]
         {
             self.state.lasti
@@ -756,7 +756,7 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             bytecode::Instruction::BuildSet { size } => {
-                let set = PySet::new_ref(&vm.ctx);
+                let set = PySet::default().into_ref(&vm.ctx);
                 for element in self.pop_multiple(size.get(arg) as usize) {
                     set.add(element, vm)?;
                 }
@@ -764,7 +764,7 @@ impl ExecutingFrame<'_> {
                 Ok(None)
             }
             bytecode::Instruction::BuildSetFromTuples { size } => {
-                let set = PySet::new_ref(&vm.ctx);
+                let set = PySet::default().into_ref(&vm.ctx);
                 for element in self.pop_multiple(size.get(arg) as usize) {
                     // SAFETY: trust compiler
                     let tup = unsafe { element.downcast_unchecked::<PyTuple>() };
@@ -800,26 +800,40 @@ impl ExecutingFrame<'_> {
             bytecode::Instruction::BuildMapForCall { size } => {
                 self.execute_build_map_for_call(vm, size.get(arg))
             }
-            bytecode::Instruction::DictUpdate => {
-                let other = self.pop_value();
-                let dict = self
-                    .top_value()
-                    .downcast_ref::<PyDict>()
-                    .expect("exact dict expected");
+            bytecode::Instruction::DictUpdate { index } => {
+                // Stack before: [..., dict, ..., source]  (source at TOS)
+                // Stack after:  [..., dict, ...]  (source consumed)
+                // The dict to update is at position TOS-i (before popping source)
+
+                let idx = index.get(arg);
+
+                // Pop the source from TOS
+                let source = self.pop_value();
+
+                // Get the dict to update (it's now at TOS-(i-1) after popping source)
+                let dict = if idx <= 1 {
+                    // DICT_UPDATE 0 or 1: dict is at TOS (after popping source)
+                    self.top_value()
+                } else {
+                    // DICT_UPDATE n: dict is at TOS-(n-1)
+                    self.nth_value(idx - 1)
+                };
+
+                let dict = dict.downcast_ref::<PyDict>().expect("exact dict expected");
 
                 // For dictionary unpacking {**x}, x must be a mapping
                 // Check if the object has the mapping protocol (keys method)
                 if vm
-                    .get_method(other.clone(), vm.ctx.intern_str("keys"))
+                    .get_method(source.clone(), vm.ctx.intern_str("keys"))
                     .is_none()
                 {
                     return Err(vm.new_type_error(format!(
                         "'{}' object is not a mapping",
-                        other.class().name()
+                        source.class().name()
                     )));
                 }
 
-                dict.merge_object(other, vm)?;
+                dict.merge_object(source, vm)?;
                 Ok(None)
             }
             bytecode::Instruction::BuildSlice { step } => {
@@ -1313,7 +1327,7 @@ impl ExecutingFrame<'_> {
                 // push a tuple of extracted attributes.
                 if subject.is_instance(cls.as_ref(), vm)? {
                     let mut extracted = vec![];
-                    for name in names.iter() {
+                    for name in names {
                         let name_str = name.downcast_ref::<PyStr>().unwrap();
                         let value = subject.get_attr(name_str, vm)?;
                         extracted.push(value);
@@ -2074,7 +2088,7 @@ impl ExecutingFrame<'_> {
             bytecode::TestOperator::NotIn => self._not_in(vm, &a, &b)?,
             bytecode::TestOperator::ExceptionMatch => {
                 if let Some(tuple_of_exceptions) = b.downcast_ref::<PyTuple>() {
-                    for exception in tuple_of_exceptions.iter() {
+                    for exception in tuple_of_exceptions {
                         if !exception
                             .is_subclass(vm.ctx.exceptions.base_exception_type.into(), vm)?
                         {
